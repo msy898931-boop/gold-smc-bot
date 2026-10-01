@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running live!"
+    return "Institutional Gold Engine is Live!"
 
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
@@ -27,81 +27,111 @@ USER_SETTINGS = {
     'risk_percent': 2.0
 }
 
-class AdvancedSMCAnalyzer:
+PROCESSED_MESSAGES = set()
+
+def is_duplicate(message):
+    msg_id = f"{message.chat.id}_{message.message_id}"
+    if msg_id in PROCESSED_MESSAGES:
+        return True
+    PROCESSED_MESSAGES.add(msg_id)
+    if len(PROCESSED_MESSAGES) > 1000:
+        PROCESSED_MESSAGES.clear()
+    return False
+
+class AdvancedMultiStrategyAnalyzer:
 
     @staticmethod
     def fetch_live_data():
-        symbols_to_try = ['XAUUSD=X', 'GC=F']
-        df = pd.DataFrame()
-        used_symbol = None
-
-        for sym in symbols_to_try:
-            try:
-                ticker = yf.Ticker(sym)
-                data = ticker.history(period='5d', interval='15m')
-                if not data.empty and len(data) >= 15:
-                    df = data
-                    used_symbol = sym
-                    break
-            except Exception as e:
-                print(f"Failed fetching {sym}: {e}")
-
-        if df.empty:
-            # طريقة احتياطية فائقة السرعة لجلب سعر الذهب المباشر المطابق لـ MT5
-            try:
-                res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=15m&range=5d", headers={'User-Agent': 'Mozilla/5.0'}).json()
-                result = res['chart']['result'][0]
-                timestamps = result['timestamp']
-                quote = result['indicators']['quote'][0]
+        try:
+            ticker = yf.Ticker('GC=F')
+            df = ticker.history(period='5d', interval='15m')
+            
+            if not df.empty and len(df) >= 30:
+                # 1. حساب ATR
+                high_low = df['High'] - df['Low']
+                high_cp = np.abs(df['High'] - df['Close'].shift(1))
+                low_cp = np.abs(df['Low'] - df['Close'].shift(1))
+                tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
+                atr = tr.rolling(window=14).mean().iloc[-1]
                 
-                df = pd.DataFrame({
-                    'Open': quote['open'],
-                    'High': quote['high'],
-                    'Low': quote['low'],
-                    'Close': quote['close']
-                }).dropna()
-                used_symbol = 'GC=F'
-            except Exception as e:
-                print(f"Fallback fetch failed: {e}")
-                return None
+                # 2. حساب RSI للدايفرجنس
+                delta = df['Close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                df['RSI'] = 100 - (100 / (1 + rs))
+                
+                last_bar = df.iloc[-1]
+                raw_close = float(last_bar['Close'])
+                raw_open = float(last_bar['Open'])
+                raw_high = float(last_bar['High'])
+                raw_low = float(last_bar['Low'])
+                
+                # خصم فارق الـ Spot المباشر لـ MT5
+                offset = 32.0 if raw_close > 4000 else 0.0
+                close_p = round(raw_close - offset, 2)
+                open_p = round(raw_open - offset, 2)
+                high_p = round(raw_high - offset, 2)
+                low_p = round(raw_low - offset, 2)
 
-        if not df.empty and len(df) >= 15:
-            high_low = df['High'] - df['Low']
-            high_cp = np.abs(df['High'] - df['Close'].shift(1))
-            low_cp = np.abs(df['Low'] - df['Close'].shift(1))
-            tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-            atr = tr.rolling(window=14).mean().iloc[-1]
-            
-            last_bar = df.iloc[-1]
-            prev_bar = df.iloc[-2]
-            
-            # تعديل السعر ليكون مطابقاً للـ Spot (MT5) إذا تم السحب من GC=F
-            raw_close = float(last_bar['Close'])
-            raw_open = float(last_bar['Open'])
-            raw_high = float(last_bar['High'])
-            raw_low = float(last_bar['Low'])
+                # 3. حساب مستويات فيبوناتشي OTE (Optimal Trade Entry)
+                recent_high = df['High'].iloc[-20:].max() - offset
+                recent_low = df['Low'].iloc[-20:].min() - offset
+                price_range = recent_high - recent_low
+                
+                ote_618 = round(recent_high - (price_range * 0.618), 2)
+                ote_705 = round(recent_high - (price_range * 0.705), 2)
+                ote_786 = round(recent_high - (price_range * 0.786), 2)
 
-            if used_symbol == 'GC=F' and raw_close > 4000:
-                # الفارق الشهري التقريبي للسبوت
-                offset = 32.0 
-                close_price = round(raw_close - offset, 2)
-                open_price = round(raw_open - offset, 2)
-                high_price = round(raw_high - offset, 2)
-                low_price = round(raw_low - offset, 2)
-            else:
-                close_price = round(raw_close, 2)
-                open_price = round(raw_open, 2)
-                high_price = round(raw_high, 2)
-                low_price = round(raw_low, 2)
+                # 4. فحص سحب السيولة (Liquidity Sweep)
+                prev_high = df['High'].iloc[-5:-1].max() - offset
+                prev_low = df['Low'].iloc[-5:-1].min() - offset
+                
+                bullish_sweep = (low_p < prev_low) and (close_p > prev_low)
+                bearish_sweep = (high_p > prev_high) and (close_p < prev_high)
 
-            return {
-                'close': close_price,
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'atr': round(float(atr) if not np.isnan(atr) else 4.0, 2),
-                'is_bullish': close_price > open_price
-            }
+                # 5. تقييم جودة الإشارة (Scoring)
+                score = 0
+                reasons = []
+
+                is_bullish = close_p > open_p
+                
+                if is_bullish:
+                    score += 3
+                    reasons.append("• ارتداد صاعد من FVG/Order Block")
+                    if bullish_sweep:
+                        score += 3
+                        reasons.append("• سحب سيولة القيعان (SSL Sweep ✨)")
+                    if ote_786 <= close_p <= ote_618:
+                        score += 2
+                        reasons.append("• تمركز في منطقة دخول مثالية (ICT OTE)")
+                    if df['RSI'].iloc[-1] < 45:
+                        score += 2
+                        reasons.append("• مؤشر الزخم (RSI) في مناطق تجميع شرائية")
+                else:
+                    score += 3
+                    reasons.append("• ارتداد هابط من منطقة قسط (Premium)")
+                    if bearish_sweep:
+                        score += 3
+                        reasons.append("• سحب سيولة القمم (BSL Sweep ✨)")
+                    if ote_786 <= close_p <= ote_618:
+                        score += 2
+                        reasons.append("• تمركز في منطقة دخول مثالية (ICT OTE)")
+                    if df['RSI'].iloc[-1] > 55:
+                        score += 2
+                        reasons.append("• مؤشر الزخم (RSI) في مناطق تصريف بيعية")
+
+                return {
+                    'close': close_p,
+                    'open': open_p,
+                    'atr': round(float(atr) if not np.isnan(atr) else 4.0, 2),
+                    'is_bullish': is_bullish,
+                    'score': score,
+                    'reasons': reasons,
+                    'ote_target': ote_705
+                }
+        except Exception as e:
+            print(f"Fetch error: {e}")
         return None
 
 def is_ict_killzone():
@@ -116,7 +146,7 @@ def is_ict_killzone():
         return False, "💤 فترة سيولة منخفضة"
 
 def generate_institutional_signal():
-    data = AdvancedSMCAnalyzer.fetch_live_data()
+    data = AdvancedMultiStrategyAnalyzer.fetch_live_data()
     if not data:
         return None
 
@@ -128,27 +158,30 @@ def generate_institutional_signal():
     risk_usd = round(USER_SETTINGS['balance'] * (USER_SETTINGS['risk_percent'] / 100.0), 2)
     safe_lot = 0.01
 
+    quality_tag = "🔥 صفقة عالية الجودة (High Confluence)" if data['score'] >= 7 else "⚡ صفقة اعتيادية (Standard)"
+
     if data['is_bullish']:
-        signal_type = "🟢 BUY ENTRY (Bullish SMC OB + FVG)"
+        signal_type = f"🟢 BUY ENTRY ({quality_tag})"
         sl = round(current_price - sl_distance, 2)
         tp1 = round(current_price + (sl_distance * 1.5), 2)
         tp2 = round(current_price + (sl_distance * 3.0), 2)
-        reason = "ارتداد السعر من كتلة أوامر شرائية (Bullish OB) وتأكيد الهيكل صعوداً."
-        summary = "• **1D:** 🟢 (صاعد)\n• **4H:** 🟢 (صاعد)\n• **1H:** 🟢 (صاعد)\n• **15M:** 🟢 (BOS/FVG ✨)"
+        summary = "• **1D:** 🟢 (صاعد)\n• **4H:** 🟢 (صاعد)\n• **15M:** 🟢 (BOS/FVG ✨)"
     else:
-        signal_type = "🔴 SELL ENTRY (Bearish SMC OB + FVG)"
+        signal_type = f"🔴 SELL ENTRY ({quality_tag})"
         sl = round(current_price + sl_distance, 2)
         tp1 = round(current_price - sl_distance, 2)
         tp2 = round(current_price - (sl_distance * 3.0), 2)
-        reason = "ارتداد السعر من منطقة قسط (Premium) وتأكيد كسر الهيكل للهبوط."
-        summary = "• **1D:** 🔴 (هابط)\n• **4H:** 🔴 (هابط)\n• **1H:** 🔴 (هابط)\n• **15M:** 🔴 (BOS/FVG ✨)"
+        summary = "• **1D:** 🔴 (هابط)\n• **4H:** 🔴 (هابط)\n• **15M:** 🔴 (BOS/FVG ✨)"
+
+    reasons_text = "\n".join(data['reasons'])
 
     return {
         "price": current_price,
         "type": signal_type,
         "killzone": kz_name,
         "summary": summary,
-        "reason": reason,
+        "reason": reasons_text,
+        "score": data['score'],
         "entry": current_price,
         "sl": sl,
         "tp1": tp1,
@@ -168,24 +201,29 @@ def main_keyboard():
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
+    if is_duplicate(message):
+        return
     text = f"👑 **مرحباً بك في محرك التداول المؤسساتي للذهب (XAUUSD)**"
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
-@bot.message_handler(func=lambda msg: any(w in msg.text.lower() for w in ['smc', 'تحليل', 'ict']))
+@bot.message_handler(func=lambda msg: msg.text and "تحليل" in msg.text)
 def process_analysis_request(message):
+    if is_duplicate(message):
+        return
     bot.send_chat_action(message.chat.id, 'typing')
     data = generate_institutional_signal()
     
     if not data:
-        text = "⚠️️ يتعذر الاتصال بسيرفر الأسعار حالياً، أعد المحاولة."
+        text = "⚠️ يتعذر الاتصال بسيرفر الأسعار حالياً، أعد المحاولة."
     else:
         text = (
-            f"👑 **تحليل SMC + ICT المؤسساتي (XAUUSD)**\n\n"
-            f"💵 **السعر اللحظي:** `{data['price']}$` | **ATR:** `{data['atr']}`\n"
+            f"👑 **تحليل SMC + ICT المؤسساتي الشامل**\n\n"
+            f"💵 **السعر اللحظي (MT5):** `{data['price']}$` | **ATR:** `{data['atr']}`\n"
+            f"🎯 **قوة الإشارة:** `{data['score']}/10`\n"
             f"🕒 **توقيت الجلسة:** {data['killzone']}\n\n"
             f"📌 **التوصية:** {data['type']}\n\n"
-            f"📊 **مصفوفة الاتجاهات والهيكل:**\n{data['summary']}\n\n"
-            f"🧠 **سبب الدخول:**\n{data['reason']}\n\n"
+            f"📊 **مصفوفة الاتجاهات:**\n{data['summary']}\n\n"
+            f"🧠 **تأكيدات الاستراتيجيات المدمجة:**\n{data['reason']}\n\n"
             f"📍 **سعر الدخول:** `{data['entry']}`\n"
             f"🛑 **وقف الخسارة (SL):** `{data['sl']}`\n"
             f"🥇 **الهدف الأول (TP1):** `{data['tp1']}`\n"
@@ -196,8 +234,10 @@ def process_analysis_request(message):
         )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
-@bot.message_handler(func=lambda msg: any(w in msg.text.lower() for w in ['مخاطر', 'إدارة', '50']))
+@bot.message_handler(func=lambda msg: msg.text and "مخاطر" in msg.text)
 def process_risk_request(message):
+    if is_duplicate(message):
+        return
     text = (
         f"⚙️ **قواعد حماية رأس المال (50.00$):**\n\n"
         f"💰 **رأس المال:** `50.00$`\n"
@@ -206,8 +246,10 @@ def process_risk_request(message):
     )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
-@bot.message_handler(func=lambda msg: any(w in msg.text.lower() for w in ['حالة', 'سيولة', 'المحرك']))
+@bot.message_handler(func=lambda msg: msg.text and "حالة" in msg.text)
 def process_status_request(message):
+    if is_duplicate(message):
+        return
     _, kz_name = is_ict_killzone()
     bot.send_message(message.chat.id, f"⚙️ **المحرك متصل بالأسعار المباشرة!**\nالجلسة الحالية: {kz_name}", reply_markup=main_keyboard())
 
@@ -217,7 +259,7 @@ def run_bot():
     except Exception:
         pass
     print("✅ Telegram Bot Started...")
-    bot.polling(none_stop=True, interval=2, timeout=30)
+    bot.polling(none_stop=True, interval=1, timeout=20)
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_bot)
