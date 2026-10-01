@@ -10,7 +10,6 @@ import telebot
 from telebot import types
 from flask import Flask
 
-# 1. خادم Flask لإرضاء Render Web Service
 app = Flask(__name__)
 
 @app.route('/')
@@ -23,46 +22,86 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
-# ضبط الرمز ليكون XAUUSD=X ليعطي سعر السبوت المباشر المطابق لمنصات MT5
 USER_SETTINGS = {
     'balance': 50.0,
-    'risk_percent': 2.0,
-    'symbol': 'XAUUSD=X'
+    'risk_percent': 2.0
 }
 
 class AdvancedSMCAnalyzer:
 
     @staticmethod
     def fetch_live_data():
-        try:
-            ticker = yf.Ticker(USER_SETTINGS['symbol'])
-            df = ticker.history(period='5d', interval='15m')
-            
-            if df.empty:
-                ticker2 = yf.Ticker('GC=F')
-                df = ticker2.history(period='5d', interval='15m')
+        symbols_to_try = ['XAUUSD=X', 'GC=F']
+        df = pd.DataFrame()
+        used_symbol = None
 
-            if not df.empty and len(df) >= 15:
-                df = df[['Open', 'High', 'Low', 'Close']].dropna()
+        for sym in symbols_to_try:
+            try:
+                ticker = yf.Ticker(sym)
+                data = ticker.history(period='5d', interval='15m')
+                if not data.empty and len(data) >= 15:
+                    df = data
+                    used_symbol = sym
+                    break
+            except Exception as e:
+                print(f"Failed fetching {sym}: {e}")
+
+        if df.empty:
+            # طريقة احتياطية فائقة السرعة لجلب سعر الذهب المباشر المطابق لـ MT5
+            try:
+                res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=15m&range=5d", headers={'User-Agent': 'Mozilla/5.0'}).json()
+                result = res['chart']['result'][0]
+                timestamps = result['timestamp']
+                quote = result['indicators']['quote'][0]
                 
-                high_low = df['High'] - df['Low']
-                high_cp = np.abs(df['High'] - df['Close'].shift(1))
-                low_cp = np.abs(df['Low'] - df['Close'].shift(1))
-                tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-                atr = tr.rolling(window=14).mean().iloc[-1]
-                
-                last_bar = df.iloc[-1]
-                
-                return {
-                    'close': round(float(last_bar['Close']), 2),
-                    'open': round(float(last_bar['Open']), 2),
-                    'high': round(float(last_bar['High']), 2),
-                    'low': round(float(last_bar['Low']), 2),
-                    'atr': round(float(atr) if not np.isnan(atr) else 4.0, 2),
-                    'is_bullish': last_bar['Close'] > last_bar['Open']
-                }
-        except Exception as e:
-            print(f"Error fetching data: {e}")
+                df = pd.DataFrame({
+                    'Open': quote['open'],
+                    'High': quote['high'],
+                    'Low': quote['low'],
+                    'Close': quote['close']
+                }).dropna()
+                used_symbol = 'GC=F'
+            except Exception as e:
+                print(f"Fallback fetch failed: {e}")
+                return None
+
+        if not df.empty and len(df) >= 15:
+            high_low = df['High'] - df['Low']
+            high_cp = np.abs(df['High'] - df['Close'].shift(1))
+            low_cp = np.abs(df['Low'] - df['Close'].shift(1))
+            tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
+            atr = tr.rolling(window=14).mean().iloc[-1]
+            
+            last_bar = df.iloc[-1]
+            prev_bar = df.iloc[-2]
+            
+            # تعديل السعر ليكون مطابقاً للـ Spot (MT5) إذا تم السحب من GC=F
+            raw_close = float(last_bar['Close'])
+            raw_open = float(last_bar['Open'])
+            raw_high = float(last_bar['High'])
+            raw_low = float(last_bar['Low'])
+
+            if used_symbol == 'GC=F' and raw_close > 4000:
+                # الفارق الشهري التقريبي للسبوت
+                offset = 32.0 
+                close_price = round(raw_close - offset, 2)
+                open_price = round(raw_open - offset, 2)
+                high_price = round(raw_high - offset, 2)
+                low_price = round(raw_low - offset, 2)
+            else:
+                close_price = round(raw_close, 2)
+                open_price = round(raw_open, 2)
+                high_price = round(raw_high, 2)
+                low_price = round(raw_low, 2)
+
+            return {
+                'close': close_price,
+                'open': open_price,
+                'high': high_price,
+                'low': low_price,
+                'atr': round(float(atr) if not np.isnan(atr) else 4.0, 2),
+                'is_bullish': close_price > open_price
+            }
         return None
 
 def is_ict_killzone():
@@ -138,7 +177,7 @@ def process_analysis_request(message):
     data = generate_institutional_signal()
     
     if not data:
-        text = "⚠️ يتعذر الاتصال بسيرفر الأسعار حالياً، أعد المحاولة."
+        text = "⚠️️ يتعذر الاتصال بسيرفر الأسعار حالياً، أعد المحاولة."
     else:
         text = (
             f"👑 **تحليل SMC + ICT المؤسساتي (XAUUSD)**\n\n"
