@@ -1,12 +1,21 @@
 import os
 import time
 import datetime
+import threading
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import telebot
 from telebot import types
+from flask import Flask
+
+# 1. خادم Flask لإرضاء Render Web Service
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running live!"
 
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
@@ -42,7 +51,6 @@ class AdvancedSMCAnalyzer:
                 atr = tr.rolling(window=14).mean().iloc[-1]
                 
                 last_bar = df.iloc[-1]
-                prev_bar = df.iloc[-2]
                 
                 return {
                     'close': round(float(last_bar['Close']), 2),
@@ -50,7 +58,7 @@ class AdvancedSMCAnalyzer:
                     'high': round(float(last_bar['High']), 2),
                     'low': round(float(last_bar['Low']), 2),
                     'atr': round(float(atr) if not np.isnan(atr) else 4.0, 2),
-                    'is_bullish': last_bar['Close'] > prev_bar['Close']
+                    'is_bullish': last_bar['Close'] > last_bar['Open']
                 }
         except Exception as e:
             print(f"Error fetching data: {e}")
@@ -90,7 +98,7 @@ def generate_institutional_signal():
     else:
         signal_type = "🔴 SELL ENTRY (Bearish SMC OB + FVG)"
         sl = round(current_price + sl_distance, 2)
-        tp1 = round(current_price - (sl_distance * 1.5), 2)
+        tp1 = round(current_price - sl_distance, 2)
         tp2 = round(current_price - (sl_distance * 3.0), 2)
         reason = "ارتداد السعر من منطقة قسط (Premium) وتأكيد كسر الهيكل للهبوط."
         summary = "• **1D:** 🔴 (هابط)\n• **4H:** 🔴 (هابط)\n• **1H:** 🔴 (هابط)\n• **15M:** 🔴 (BOS/FVG ✨)"
@@ -151,9 +159,9 @@ def process_analysis_request(message):
 @bot.message_handler(func=lambda msg: any(w in msg.text.lower() for w in ['مخاطر', 'إدارة', '50']))
 def process_risk_request(message):
     text = (
-        f"⚙️ **قواعد حماية رأس المال (50.00$):**\n\n"
+        f"⚙️️ **قواعد حماية رأس المال (50.00$):**\n\n"
         f"💰 **رأس المال:** `50.00$`\n"
-        f"⚠️️ **نسبة المخاطرة لكل صفقة:** `2%` (1.00$ فقط)\n"
+        f"⚠️ **نسبة المخاطرة لكل صفقة:** `2%` (1.00$ فقط)\n"
         f"📏 **حجم اللوت:** `0.01` Micro Lot."
     )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
@@ -163,10 +171,19 @@ def process_status_request(message):
     _, kz_name = is_ict_killzone()
     bot.send_message(message.chat.id, f"⚙️ **المحرك متصل بالأسعار المباشرة!**\nالجلسة الحالية: {kz_name}", reply_markup=main_keyboard())
 
-if __name__ == "__main__":
+def run_bot():
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    print("✅ Bot is running on Render...")
+    print("✅ Telegram Bot Started...")
     bot.polling(none_stop=True, interval=2, timeout=30)
+
+if __name__ == "__main__":
+    # تشغيل البوت في خيط منفصل (Thread)
+    t = threading.Thread(target=run_bot)
+    t.start()
+    
+    # تشغيل خادم Flask على المنفذ المطلوب من Render
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
