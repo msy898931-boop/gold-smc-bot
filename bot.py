@@ -23,10 +23,11 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
+# ضبط الرمز ليكون XAUUSD=X ليعطي سعر السبوت المباشر المطابق لمنصات MT5
 USER_SETTINGS = {
     'balance': 50.0,
     'risk_percent': 2.0,
-    'symbol': 'GC=F'
+    'symbol': 'XAUUSD=X'
 }
 
 class AdvancedSMCAnalyzer:
@@ -38,7 +39,7 @@ class AdvancedSMCAnalyzer:
             df = ticker.history(period='5d', interval='15m')
             
             if df.empty:
-                ticker2 = yf.Ticker('XAUUSD=X')
+                ticker2 = yf.Ticker('GC=F')
                 df = ticker2.history(period='5d', interval='15m')
 
             if not df.empty and len(df) >= 15:
@@ -159,7 +160,7 @@ def process_analysis_request(message):
 @bot.message_handler(func=lambda msg: any(w in msg.text.lower() for w in ['مخاطر', 'إدارة', '50']))
 def process_risk_request(message):
     text = (
-        f"⚙️️ **قواعد حماية رأس المال (50.00$):**\n\n"
+        f"⚙️ **قواعد حماية رأس المال (50.00$):**\n\n"
         f"💰 **رأس المال:** `50.00$`\n"
         f"⚠️ **نسبة المخاطرة لكل صفقة:** `2%` (1.00$ فقط)\n"
         f"📏 **حجم اللوت:** `0.01` Micro Lot."
@@ -180,10 +181,8 @@ def run_bot():
     bot.polling(none_stop=True, interval=2, timeout=30)
 
 if __name__ == "__main__":
-    # تشغيل البوت في خيط منفصل (Thread)
     t = threading.Thread(target=run_bot)
     t.start()
     
-    # تشغيل خادم Flask على المنفذ المطلوب من Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
