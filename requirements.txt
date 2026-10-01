@@ -1,0 +1,5 @@
+pyTelegramBotAPI
+requests
+yfinance
+pandas
+numpy
