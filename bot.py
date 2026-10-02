@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Multi-Timeframe Gold Engine (H1 + M15) is Live!"
+    return "Dynamic Spot Gold Engine is Live!"
 
 TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('MY_CHAT_ID')
@@ -24,13 +24,7 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
-USER_SETTINGS = {
-    'balance': 50.0,
-    'risk_percent': 2.0
-}
-
 PROCESSED_MESSAGES = set()
-LAST_ALERT_SIGNAL = None
 
 def is_duplicate(message):
     msg_id = f"{message.chat.id}_{message.message_id}"
@@ -46,16 +40,33 @@ class InstitutionalMultiTimeframeFetcher:
     @staticmethod
     def get_market_data():
         try:
-            # جلب بيانات M15 و H1
-            ticker = yf.Ticker('GC=F')
-            df_m15 = ticker.history(period='5d', interval='15m')
-            df_h1 = ticker.history(period='10d', interval='1h')
+            # 1. محاولة جلب Spot XAUUSD مباشرة
+            df_m15 = yf.Ticker('XAUUSD=X').history(period='5d', interval='15m')
+            df_h1 = yf.Ticker('XAUUSD=X').history(period='10d', interval='1h')
 
-            if df_m15.empty or df_h1.empty or len(df_m15) < 20 or len(df_h1) < 20:
+            # 2. في حال عدم توفره، جلب السعر المباشر وحساب الفارق اللحظي تلقائياً (Dynamic Offset)
+            if df_m15.empty or len(df_m15) < 20:
+                df_futures = yf.Ticker('GC=F').history(period='5d', interval='15m')
+                df_h1_fut = yf.Ticker('GC=F').history(period='10d', interval='1h')
+                
+                # جلب سعر السبوت الحالي من سيرفر ثانوي لحساب الفارق اللحظي المباشر
+                res = requests.get("https://api.exchangerate-api.com/v4/latest/XAU", timeout=5).json()
+                spot_price_now = 1 / res['rates']['USD'] if 'rates' in res else None
+                
+                if spot_price_now and not df_futures.empty:
+                    fut_close = float(df_futures['Close'].iloc[-1])
+                    dynamic_offset = fut_close - spot_price_now
+                else:
+                    dynamic_offset = 0.0
+
+                df_m15 = df_futures
+                df_h1 = df_h1_fut
+                offset = dynamic_offset
+            else:
+                offset = 0.0
+
+            if df_m15.empty or df_h1.empty:
                 return None
-
-            last_raw = float(df_m15['Close'].iloc[-1])
-            offset = 32.10 if last_raw > 4000 else 0.0
 
             # حساب ATR على M15
             high_low = df_m15['High'] - df_m15['Low']
@@ -64,21 +75,18 @@ class InstitutionalMultiTimeframeFetcher:
             tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
             atr_m15 = tr.rolling(window=14).mean().iloc[-1]
 
-            # أسعار M15 المعدلة
             close_m15 = round(float(df_m15['Close'].iloc[-1]) - offset, 2)
             open_m15 = round(float(df_m15['Open'].iloc[-1]) - offset, 2)
             high_m15 = round(float(df_m15['High'].iloc[-1]) - offset, 2)
             low_m15 = round(float(df_m15['Low'].iloc[-1]) - offset, 2)
 
-            # تحليل الاتجاه والسحب على H1
+            # فحص H1
             h1_high_prev = df_h1['High'].iloc[-5:-1].max() - offset
             h1_low_prev = df_h1['Low'].iloc[-5:-1].min() - offset
             h1_close = float(df_h1['Close'].iloc[-1]) - offset
 
             h1_bullish_sweep = (df_h1['Low'].iloc[-1] - offset < h1_low_prev) and (h1_close > h1_low_prev)
             h1_bearish_sweep = (df_h1['High'].iloc[-1] - offset > h1_high_prev) and (h1_close < h1_high_prev)
-
-            # تحديد الاتجاه العام للفريم الكبير H1
             h1_trend = "صاعد (Bullish)" if df_h1['Close'].iloc[-1] > df_h1['Open'].iloc[-5] else "هابط (Bearish)"
 
             return {
@@ -95,7 +103,7 @@ class InstitutionalMultiTimeframeFetcher:
                 'is_bullish_m15': close_m15 > open_m15
             }
         except Exception as e:
-            print(f"MTF Fetch Error: {e}")
+            print(f"Fetch Error: {e}")
             return None
 
 def is_ict_killzone():
@@ -123,13 +131,9 @@ def main_keyboard():
 def send_welcome(message):
     if is_duplicate(message):
         return
-    text = (
-        f"👑 **مرحباً بك في محرك التداول المؤسساتي المطور (H1 + M15)**\n\n"
-        f"اختر الاستراتيجية المراد فحصها يدويًا من الأزرار بالأسفل:"
-    )
+    text = "👑 **مرحباً بك في محرك التداول المؤسساتي المطور (سعر مسبار تلقائي)**"
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
-# --- التحليل المؤسساتي المطور H1 + M15 ---
 @bot.message_handler(func=lambda msg: msg.text and "SMC" in msg.text)
 def process_smc_request(message):
     if is_duplicate(message):
@@ -146,14 +150,13 @@ def process_smc_request(message):
     _, kz_name = is_ict_killzone()
     sl_dist = round(max(atr_v * 1.5, 5.0), 2)
 
-    # تحليل الاتجاه المتطابق بين H1 و M15
     if data['h1_bearish_sweep'] or (data['h1_trend'] == "هابط (Bearish)" and not data['is_bullish_m15']):
         sig = "🔴 SELL ENTRY (Bearish OB + H1 BSL Sweep)"
         sl = round(curr_p + sl_dist, 2)
         tp1 = round(curr_p - (sl_dist * 1.2), 2)
         tp2 = round(curr_p - (sl_dist * 2.5), 2)
         tp3 = round(curr_p - (sl_dist * 4.5), 2)
-        reason = "سحب سيولة القمم على فريم الساعة (H1 BSL) مع ارتداد هابط على المدى القصير (M15)."
+        reason = "سحب سيولة القمم على فريم الساعة (H1 BSL) مع ارتداد هابط على M15."
     else:
         sig = "🟢 BUY ENTRY (Bullish OB + H1 SSL Sweep)"
         sl = round(curr_p - sl_dist, 2)
@@ -163,7 +166,7 @@ def process_smc_request(message):
         reason = "سحب سيولة القيعان على فريم الساعة (H1 SSL) واختراق صاعد للهيكل."
 
     text = (
-        f"👑 **تحليل SMC + ICT المطور (H1 & M15 Analysis)**\n\n"
+        f"👑 **تحليل SMC + ICT المطور (Dynamic Spot Engine)**\n\n"
         f"💵 **السعر اللحظي (MT5):** `{curr_p}$` | **ATR:** `{atr_v}`\n"
         f"📊 **اتجاه فريم الساعة (H1):** `{data['h1_trend']}`\n"
         f"🕒 **الجلسة:** {kz_name}\n\n"
@@ -189,8 +192,8 @@ def process_ote_request(message):
 
     df = data['df_m15']
     curr_p = data['close']
-    recent_h = df['High'].iloc[-20:].max() - 32.10
-    recent_l = df['Low'].iloc[-20:].min() - 32.10
+    recent_h = df['High'].iloc[-20:].max()
+    recent_l = df['Low'].iloc[-20:].min()
     rng = recent_h - recent_l
 
     ote_618 = round(recent_h - (rng * 0.618), 2)
@@ -217,10 +220,10 @@ def process_sweeps_request(message):
         return
 
     curr_p = data['close']
-    status = "🔥 **سحب سيولة قمم (H1/M15 BSL Sweep)!**" if data['h1_bearish_sweep'] else ("🔥 **سحب سيولة قيعان (H1/M15 SSL Sweep)!**" if data['h1_bullish_sweep'] else "💤 **لا يوجد سحب سيولة قوي على H1 حالياً.**")
+    status = "🔥 **سحب سيولة قمم (H1/M15 BSL Sweep)!**" if data['h1_bearish_sweep'] else ("🔥 **سحب سيولة قيعان (H1/M15 SSL Sweep)!**" if data['h1_bullish_sweep'] else "💤 **لا يوجد سحب سيولة قوي حالياً.**")
 
     text = (
-        f"🌊 **رادار سحب السيولة المتعدد (H1 & M15)**\n\n"
+        f"🌊 **رادار سحب السيولة (H1 & M15)**\n\n"
         f"💵 **السعر الحالي:** `{curr_p}$`\n"
         f"📊 **النتيجة:** {status}"
     )
@@ -230,12 +233,7 @@ def process_sweeps_request(message):
 def process_risk_request(message):
     if is_duplicate(message):
         return
-    text = (
-        f"🧮 **إدارة مخاطر الحساب ($50.00):**\n\n"
-        f"💰 **رأس المال:** `50.00$`\n"
-        f"⚠️ **نسبة المخاطرة:** `2%` (1.00$)\n"
-        f"📏 **حجم اللوت:** `0.01` Micro"
-    )
+    text = "🧮 **إدارة مخاطر الحساب ($50.00):**\nلوت آمن: `0.01` Micro."
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda msg: msg.text and "حالة" in msg.text)
@@ -243,19 +241,17 @@ def process_status_request(message):
     if is_duplicate(message):
         return
     _, kz_name = is_ict_killzone()
-    bot.send_message(message.chat.id, f"⚙️ **المحرك متعدد الفريمات (H1 + M15) متصل ومطابق 100%!**\nالجلسة الحالية: {kz_name}", reply_markup=main_keyboard())
+    bot.send_message(message.chat.id, f"⚙️ **المحرك متصل بنظام الفارق اللحظي الديناميكي!**\nالجلسة: {kz_name}", reply_markup=main_keyboard())
 
 def run_bot():
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    print("✅ Telegram Bot Started...")
     bot.polling(none_stop=True, interval=1, timeout=20)
 
 if __name__ == "__main__":
     t_bot = threading.Thread(target=run_bot)
     t_bot.start()
-    
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
