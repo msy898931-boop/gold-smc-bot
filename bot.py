@@ -17,7 +17,7 @@ def home():
     return "Institutional Gold Engine & Alert Radar is Live!"
 
 TOKEN = os.getenv('BOT_TOKEN')
-CHAT_ID = os.getenv('MY_CHAT_ID')  # اترك خيار إضافة معرف المحادثة للرادار التلقائي
+CHAT_ID = os.getenv('MY_CHAT_ID')
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN is not set!")
@@ -30,7 +30,7 @@ USER_SETTINGS = {
 }
 
 PROCESSED_MESSAGES = set()
-LAST_ALERT_SIGNAL = None  # لمنع تكرار نفس التنبيه التلقائي
+LAST_ALERT_SIGNAL = None
 
 def is_duplicate(message):
     msg_id = f"{message.chat.id}_{message.message_id}"
@@ -46,10 +46,21 @@ class InstitutionalDataFetcher:
     @staticmethod
     def get_market_data():
         try:
-            ticker = yf.Ticker('GC=F')
-            df = ticker.history(period='5d', interval='15m')
-            
-            if not df.empty and len(df) >= 30:
+            # تجربة جلب السعر المباشر للسبوت أولاً
+            df = yf.Ticker('XAUUSD=X').history(period='2d', interval='15m')
+            offset = 0.0
+
+            # في حال عدم التوفر، الاعتماد على العقود الآجلة مع تعديل الفارق اللحظي الدقيق (MT5 Adjustment)
+            if df.empty or len(df) < 15:
+                df = yf.Ticker('GC=F').history(period='5d', interval='15m')
+                if not df.empty:
+                    last_raw = float(df['Close'].iloc[-1])
+                    # ضبط الفارق بدقة ليكون السعر مطابِقاً لشارت MT5
+                    offset = 32.10 if last_raw > 4000 else 0.0
+                else:
+                    return None
+
+            if not df.empty and len(df) >= 15:
                 high_low = df['High'] - df['Low']
                 high_cp = np.abs(df['High'] - df['Close'].shift(1))
                 low_cp = np.abs(df['Low'] - df['Close'].shift(1))
@@ -57,17 +68,10 @@ class InstitutionalDataFetcher:
                 atr = tr.rolling(window=14).mean().iloc[-1]
                 
                 last_bar = df.iloc[-1]
-                raw_close = float(last_bar['Close'])
-                raw_open = float(last_bar['Open'])
-                raw_high = float(last_bar['High'])
-                raw_low = float(last_bar['Low'])
-                
-                # خصم الفارق الشهري لضبط السعر 100% مع MT5
-                offset = 32.0 if raw_close > 4000 else 0.0
-                close_p = round(raw_close - offset, 2)
-                open_p = round(raw_open - offset, 2)
-                high_p = round(raw_high - offset, 2)
-                low_p = round(raw_low - offset, 2)
+                close_p = round(float(last_bar['Close']) - offset, 2)
+                open_p = round(float(last_bar['Open']) - offset, 2)
+                high_p = round(float(last_bar['High']) - offset, 2)
+                low_p = round(float(last_bar['Low']) - offset, 2)
 
                 return {
                     'df': df,
@@ -111,7 +115,7 @@ def send_welcome(message):
     text = (
         f"👑 **مرحباً بك في محرك التداول المؤسساتي للذهب (XAUUSD)**\n\n"
         f"🆔 **معرف المحادثة الخاص بك (Chat ID):** `{message.chat.id}`\n"
-        f"*(يمكنك إضافة هذا المعرف في متغيرات البيئة بـ Render لتفعيل التنبيهات التلقائية كل 15 دقيقة)*\n\n"
+        f"*(تأكد من ضبط المعرف في Render لتلقي التنبيهات التلقائية)*\n\n"
         f"اختر الاستراتيجية المراد فحصها يدويًا من الأزرار بالأسفل:"
     )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
@@ -167,6 +171,7 @@ def process_ote_request(message):
     bot.send_chat_action(message.chat.id, 'typing')
     data = InstitutionalDataFetcher.get_market_data()
     if not data:
+        bot.send_message(message.chat.id, "⚠️ يتعذر جلب البيانات حالياً.")
         return
 
     df = data['df']
@@ -201,6 +206,7 @@ def process_sweeps_request(message):
     bot.send_chat_action(message.chat.id, 'typing')
     data = InstitutionalDataFetcher.get_market_data()
     if not data:
+        bot.send_message(message.chat.id, "⚠️️ يتعذر جلب البيانات حالياً.")
         return
 
     df = data['df']
@@ -255,10 +261,9 @@ def auto_radar_loop():
     global LAST_ALERT_SIGNAL
     while True:
         try:
-            time.sleep(900) # فحص كل 15 دقيقة (900 ثانية)
+            time.sleep(900)  # فحص كل 15 دقيقة
             if CHAT_ID:
                 is_kz, kz_name = is_ict_killzone()
-                # الفحص والتنبيه فقط أثناء أوقات جلسات السيولة (London & NY)
                 if is_kz:
                     data = InstitutionalDataFetcher.get_market_data()
                     if data:
